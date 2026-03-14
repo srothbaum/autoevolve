@@ -46,6 +46,7 @@ name = "autoresearch"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "evo-db" },
     { name = "kernels" },
     { name = "matplotlib" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -61,6 +62,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "evo-db", editable = "../evo-db" },
     { name = "kernels", specifier = ">=0.11.7" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "numpy", specifier = ">=2.2.6" },
@@ -366,6 +368,11 @@ sdist = { url = "https://files.pythonhosted.org/packages/a9/95/a3dbbb5028f35eafb
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e7/05/c19819d5e3d95294a6f5947fb9b9629efb316b96de511b418c53d245aae6/cycler-0.12.1-py3-none-any.whl", hash = "sha256:85cef7cff222d8644161529808465972e51340599459b8ac3ccbac5a854e0d30", size = 8321, upload-time = "2023-10-07T05:32:16.783Z" },
 ]
+
+[[package]]
+name = "evo-db"
+version = "0.1.0"
+source = { editable = "../evo-db" }
 
 [[package]]
 name = "exceptiongroup"

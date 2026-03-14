@@ -12,9 +12,9 @@ To set up a new experiment, work with the user to:
    - `README.md` — repository context.
    - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
    - `train.py` — the file you modify. Model architecture, optimizer, training loop.
+   - The `evo-db` CLI — evolutionary database. Installed as a dependency. Used via CLI to record and sample experiments.
 4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
-5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
-6. **Confirm and go**: Confirm setup looks good.
+5. **Confirm and go**: Confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
 
@@ -27,6 +27,7 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 
 **What you CANNOT do:**
 - Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants (time budget, sequence length, etc).
+- Modify the `evo-db` package. It is read-only. It contains the database logic for recording and sampling experiments.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 - Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
 
@@ -55,36 +56,30 @@ num_params_M:     50.3
 depth:            8
 ```
 
-Note that the script is configured to always stop after 5 minutes, so depending on the computing platform of this computer the numbers might look different. You can extract the key metric from the log file:
-
-```
-grep "^val_bpb:" run.log
-```
+Note that the script is configured to always stop after 5 minutes, so depending on the computing platform of this computer the numbers might look different.
 
 ## Logging results
 
-When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
+When an experiment is done, log it to the evolutionary database (`evo-db` CLI). The database maintains a diverse population of experiments across a 2D feature grid (model size vs VRAM usage), with val_bpb as the fitness metric.
 
-The TSV has a header row and 5 columns:
-
+**Recording a successful experiment:**
+```bash
+evo-db add --commit <hash, short, 7 chars> --parent <id> --description "..." --log run.log
 ```
-commit	val_bpb	memory_gb	status	description
+
+**Recording a crashed experiment:**
+```bash
+evo-db add-crash --commit <hash, short, 7 chars> --parent <id> --description "..."
 ```
 
-1. git commit hash (short, 7 chars)
-2. val_bpb achieved (e.g. 1.234567) — use 0.000000 for crashes
-3. peak memory in GB, round to .1f (e.g. 12.3 — divide peak_vram_mb by 1024) — use 0.0 for crashes
-4. status: `keep`, `discard`, or `crash`
-5. short text description of what this experiment tried
+The `--log run.log` flag parses all metrics automatically from the train.py output. You only provide 3 things: commit hash, parent experiment id (from the sample step), and a description.
 
-Example:
-
-```
-commit	val_bpb	memory_gb	status	description
-a1b2c3d	0.997900	44.0	keep	baseline
-b2c3d4e	0.993200	44.2	keep	increase LR to 0.04
-c3d4e5f	1.005000	44.0	discard	switch to GeLU activation
-d4e5f6g	0.000000	0.0	crash	double model width (OOM)
+**Other useful commands:**
+```bash
+evo-db sample    # Get next parent + inspirations (JSON)
+evo-db status    # Population overview with MAP-Elites grids
+evo-db best      # Show best experiment
+evo-db history   # Recent experiments
 ```
 
 ## The experiment loop
@@ -93,21 +88,25 @@ The experiment runs on a dedicated branch (e.g. `autoresearch/mar5` or `autorese
 
 LOOP FOREVER:
 
-1. Look at the git state: the current branch/commit we're on
-2. Tune `train.py` with an experimental idea by directly hacking the code.
-3. git commit
-4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
-8. If val_bpb improved (lower), you "advance" the branch, keeping the git commit
-9. If val_bpb is equal or worse, you git reset back to where you started
+1. **SAMPLE**: Run `evo-db sample` to get a parent experiment, inspirations, and a strategy hint (exploit/explore/random). Read the JSON output carefully — it tells you what to build on and what to try.
+2. **RESTORE parent's code**: `git show <parent_commit>:train.py > train.py` — this restores the parent's version of train.py without switching branches.
+3. **DESIGN** your change based on the parent code, the inspirations, and the strategy hint. For "exploit", make incremental improvements. For "explore", try something structurally different. For "random", go bold.
+4. **EDIT** `train.py` with your experimental change.
+5. **GIT COMMIT** the change.
+6. **RUN**: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
+7. **RECORD**:
+   - Check results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
+   - If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't fix it after a few attempts, record as crash.
+   - If success: `evo-db add --commit <hash> --parent <parent_id> --description "..." --log run.log`
+   - If crash: `evo-db add-crash --commit <hash> --parent <parent_id> --description "..."`
+8. Optionally: `evo-db status` to review population state.
+9. **GOTO 1**
 
-The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
+You always start each iteration by sampling a parent from the population, which may be any past successful experiment, not just the most recent one.
 
-**Timeout**: Each experiment should take ~5 minutes total (+ a few seconds for startup and eval overhead). If a run exceeds 10 minutes, kill it and treat it as a failure (discard and revert).
+**Timeout**: Each experiment should take ~5 minutes total (+ a few seconds for startup and eval overhead). If a run exceeds 10 minutes, kill it and treat it as a failure (record as crash).
 
-**Crashes**: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the tsv, and move on.
+**Crashes**: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, record as crash, and move on.
 
 **NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
 

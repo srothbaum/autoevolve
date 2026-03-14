@@ -19,5 +19,12 @@ AGENTS.md
 # Experimental code/artifacts
 dev/
 
+# Logs
+run.log
+
 # Results file
 results.tsv
+
+# Evolutionary database
+evo_db.json
+evo_db_config.json
