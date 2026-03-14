@@ -1,10 +1,19 @@
 # autoresearch
 
-![teaser](progress.png)
+![teaser](lineage.png)
 
-*One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
+## What is this?
+This is a fork of the [autoresearch](https://github.com/karpathy/autoresearch) project with evolutionary database integration that replaces the simple tsv file based logging in the original project.
 
-The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069).
+Evolutionary algorithms have shown to be a powerful tool for autonomously discovering optimal solutions to problems with large search spaces. Famously, Google DeepMind's [AlphaEvolve](https://arxiv.org/abs/2506.13131) system uses evolutionary algorithms to discover state of the art matrix multiplication algorithms. The implementation of the evolutionary database itself is based heavily on the implementation in [OpenEvolve](https://github.com/algorithmicsuperintelligence/openevolve).
+
+A critical component of such evolutionary systems is the database of past discovered programs (which can be used to guide the search for new solutions). The database uses a simple MAP-Elites approach to maintain a diverse population of solutions across a `N`-dimensional feature grid, with a fitness metric to compare solutions and guide the search. Each time we sample, the database returns solutions from a random island along with a "strategy" hint (exploit/explore/random) to guide the search. The "strategy" hint itself is a simple probabilistic distribution over the three strategies, which can be tuned to control the balance of exploitation and exploration.
+
+The evolutionary database itself has a few hyperparameters that can be tuned which change how the search process unrolls
+For example, the number of islands, the number of generations, the number of solutions to maintain in the database, the number of solutions to sample from the database for each new solution, the fitness metric, etc.
+
+So far, evolutionary algorithms have been used in relatively simple domains with easily verifiable outcomes and an environment that is relatively easy to simulate, unlike the autoresearch problem where each training run costs real money in terms of GPU-hours.
+It would be interesting to see what set of hyperparameters would work best for the autoresearch problem.
 
 ## How it works
 
@@ -52,10 +61,12 @@ The `program.md` file is essentially a super lightweight "skill".
 ## Project structure
 
 ```
-prepare.py      — constants, data prep + runtime utilities (do not modify)
-train.py        — model, optimizer, training loop (agent modifies this)
-program.md      — agent instructions
-pyproject.toml  — dependencies
+prepare.py                    — constants, data prep + runtime utilities (do not modify)
+train.py                      — model, optimizer, training loop (agent modifies this)
+evo_db.py                     — evolutionary database manager (do not modify)
+visualize_lineage_tree.py     — visualizes the lineage tree of the evolutionary database (do not modify)
+program.md                    — agent instructions
+pyproject.toml                — dependencies
 ```
 
 ## Design choices
