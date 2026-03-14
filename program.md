@@ -12,7 +12,7 @@ To set up a new experiment, work with the user to:
    - `README.md` — repository context.
    - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
    - `train.py` — the file you modify. Model architecture, optimizer, training loop.
-   - The `evo-db` CLI — evolutionary database. Installed as a dependency. Used via CLI to record and sample experiments.
+   - `evo_db.py` — evolutionary database. Do not modify. Used via CLI to record and sample experiments.
 4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
 5. **Confirm and go**: Confirm setup looks good.
 
@@ -27,7 +27,7 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 
 **What you CANNOT do:**
 - Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants (time budget, sequence length, etc).
-- Modify the `evo-db` package. It is read-only. It contains the database logic for recording and sampling experiments.
+- Modify `evo_db.py`. It is read-only. It contains the database logic for recording and sampling experiments.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 - Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
 
@@ -60,26 +60,26 @@ Note that the script is configured to always stop after 5 minutes, so depending 
 
 ## Logging results
 
-When an experiment is done, log it to the evolutionary database (`evo-db` CLI). The database maintains a diverse population of experiments across a 2D feature grid (model size vs VRAM usage), with val_bpb as the fitness metric.
+When an experiment is done, log it to the evolutionary database (`evo_db.py`). The database maintains a diverse population of experiments across a 2D feature grid (model size vs VRAM usage), with val_bpb as the fitness metric.
 
 **Recording a successful experiment:**
 ```bash
-evo-db add --commit <hash, short, 7 chars> --parent <id> --description "..." --log run.log
+uv run evo_db add --commit <hash, short, 7 chars> --parent <id> --description "..." --log run.log
 ```
 
 **Recording a crashed experiment:**
 ```bash
-evo-db add-crash --commit <hash, short, 7 chars> --parent <id> --description "..."
+uv run evo_db add-crash --commit <hash, short, 7 chars> --parent <id> --description "..."
 ```
 
 The `--log run.log` flag parses all metrics automatically from the train.py output. You only provide 3 things: commit hash, parent experiment id (from the sample step), and a description.
 
 **Other useful commands:**
 ```bash
-evo-db sample    # Get next parent + inspirations (JSON)
-evo-db status    # Population overview with MAP-Elites grids
-evo-db best      # Show best experiment
-evo-db history   # Recent experiments
+uv run evo_db sample    # Get next parent + inspirations (JSON)
+uv run evo_db status    # Population overview with MAP-Elites grids
+uv run evo_db best      # Show best experiment
+uv run evo_db history   # Recent experiments
 ```
 
 ## The experiment loop
@@ -88,7 +88,7 @@ The experiment runs on a dedicated branch (e.g. `autoresearch/mar5` or `autorese
 
 LOOP FOREVER:
 
-1. **SAMPLE**: Run `evo-db sample` to get a parent experiment, inspirations, and a strategy hint (exploit/explore/random). Read the JSON output carefully — it tells you what to build on and what to try.
+1. **SAMPLE**: Run `uv run evo_db sample` to get a parent experiment, inspirations, and a strategy hint (exploit/explore/random). Read the JSON output carefully — it tells you what to build on and what to try.
 2. **RESTORE parent's code**: `git show <parent_commit>:train.py > train.py` — this restores the parent's version of train.py without switching branches.
 3. **DESIGN** your change based on the parent code, the inspirations, and the strategy hint. For "exploit", make incremental improvements. For "explore", try something structurally different. For "random", go bold.
 4. **EDIT** `train.py` with your experimental change.
@@ -97,9 +97,9 @@ LOOP FOREVER:
 7. **RECORD**:
    - Check results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
    - If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't fix it after a few attempts, record as crash.
-   - If success: `evo-db add --commit <hash> --parent <parent_id> --description "..." --log run.log`
-   - If crash: `evo-db add-crash --commit <hash> --parent <parent_id> --description "..."`
-8. Optionally: `evo-db status` to review population state.
+   - If success: `uv run evo_db add --commit <hash> --parent <parent_id> --description "..." --log run.log`
+   - If crash: `uv run evo_db add-crash --commit <hash> --parent <parent_id> --description "..."`
+8. Optionally: `uv run evo_db status` to review population state.
 9. **GOTO 1**
 
 You always start each iteration by sampling a parent from the population, which may be any past successful experiment, not just the most recent one.
