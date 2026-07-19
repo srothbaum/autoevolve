@@ -25,6 +25,7 @@ the same budget and hardware constraints.
 
 - Modify code outside an `EVOLVE-BLOCK` region.
 - Change the evaluator, dataset, metric parser, time budget, GPU assignment, or experiment harness.
+- Read hidden evaluation data, falsify metrics, skip required work, or exploit timing and measurement bugs.
 - Add dependencies that are not already available to the evaluator.
 
 **The goal is simple: achieve the lowest validation bits per byte (`val_bpb`).**
