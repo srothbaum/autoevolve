@@ -136,3 +136,5 @@ python -m unittest discover -s tests -v
 Implementation references:
 [OpenEvolve](https://github.com/algorithmicsuperintelligence/openevolve) and
 [OpenAlpha_Evolve](https://github.com/shyamsaktawat/OpenAlpha_Evolve).
+
+MIT License
