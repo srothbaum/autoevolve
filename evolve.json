@@ -3,7 +3,8 @@
     "iterations": 100,
     "workers": 2,
     "seed": 42,
-    "run_dir": ".autoevolve"
+    "run_dir": ".autoevolve",
+    "max_wall_seconds": null
   },
   "llm": {
     "api_base": "https://api.openai.com/v1",
@@ -11,6 +12,12 @@
     "api_key_env": "OPENAI_API_KEY",
     "timeout_seconds": 180,
     "retries": 2,
+    "selection_strategy": "ucb",
+    "ucb_exploration": 0.7,
+    "cost_penalty": 0.0,
+    "max_calls": null,
+    "max_total_tokens": null,
+    "max_cost_usd": null,
     "models": [
       {
         "provider": "openai_compatible",
@@ -19,7 +26,9 @@
         "name_env": "AUTOEVOLVE_MODEL",
         "weight": 1.0,
         "temperature": 0.8,
-        "max_tokens": 12000
+        "max_tokens": 12000,
+        "input_cost_per_million": 0.0,
+        "output_cost_per_million": 0.0
       }
     ]
   },
@@ -28,7 +37,17 @@
     "num_inspirations": 2,
     "max_prompt_chars": 140000,
     "artifact_chars": 6000,
-    "failed_attempts": 2
+    "failed_attempts": 2,
+    "proposal_retries": 2,
+    "novelty_threshold": 0.999,
+    "novelty_shingle_size": 5,
+    "memory_interval": 10,
+    "memory_items": 5,
+    "operator_weights": {
+      "patch": 0.6,
+      "rewrite": 0.25,
+      "crossover": 0.15
+    }
   },
   "evaluator": {
     "program_file": "train.py",

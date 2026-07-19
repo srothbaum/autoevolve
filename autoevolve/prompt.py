@@ -32,12 +32,38 @@ SEARCH_STYLES = (
     "Combine one complementary idea from the inspirations with the strongest parts of the parent.",
 )
 
+OPERATOR_INSTRUCTIONS = {
+    "patch": (
+        "Operator: targeted patch. Change the smallest coherent set of lines needed to test one "
+        "causal hypothesis."
+    ),
+    "rewrite": (
+        "Operator: mutable-block rewrite. Redesign one complete EVOLVE-BLOCK as a coherent unit, "
+        "expressed as a SEARCH/REPLACE of that block's contents. Keep both boundary markers and all "
+    ),
+    "crossover": (
+        "Operator: explicit crossover. Treat Inspiration 1 as the donor, combine a distinct useful "
+        "mechanism from it with the parent, and resolve interactions rather than merely copying code."
+    ),
+}
+
 
 class PromptBuilder:
     def __init__(self, config: PromptConfig, seed: int = 42):
         self.config = config
         self.random = random.Random(seed)
         self.task = Path(config.task_file).read_text(encoding="utf-8")
+
+    def choose_operator(self, has_inspiration: bool) -> str:
+        choices = [
+            (name, weight)
+            for name, weight in self.config.operator_weights.items()
+            if weight > 0 and (name != "crossover" or has_inspiration)
+        ]
+        if not choices:
+            return "patch"
+        names, weights = zip(*choices)
+        return self.random.choices(names, weights=weights, k=1)[0]
 
     @staticmethod
     def _metrics(program: Program) -> str:
@@ -70,6 +96,8 @@ class PromptBuilder:
         failed_attempts: list[Program],
         iteration: int,
         mode: str,
+        operator: str = "patch",
+        memory: str = "",
     ) -> tuple[str, str]:
         sections = [
             "# Research task",
@@ -77,7 +105,9 @@ class PromptBuilder:
             "",
             "# Evolution context",
             f"iteration: {iteration}",
-            f"sampling mode: {mode}",
+            f"parent sampling mode: {mode}",
+            f"variation operator: {operator}",
+            OPERATOR_INSTRUCTIONS[operator],
             self.random.choice(SEARCH_STYLES),
             "",
             self._program_section("Current parent", parent, include_artifacts=True),
@@ -104,6 +134,9 @@ class PromptBuilder:
                 }
                 sections.append(json.dumps(failure, sort_keys=True)[-self.config.artifact_chars :])
 
+        if memory:
+            sections.extend(["", "# Research memory", memory])
+
         sections.extend(
             [
                 "",
@@ -119,3 +152,37 @@ class PromptBuilder:
             )
         return SYSTEM_MESSAGE, user
 
+    def repair(
+        self,
+        original_user: str,
+        response: str,
+        error: str,
+        operator: str,
+        attempt: int,
+    ) -> tuple[str, str]:
+        reason = (
+            "The candidate was too similar to an archived program. Make a substantive algorithmic "
+            "change; formatting, comments, and renaming do not count."
+            if error.startswith("Novelty gate") or error.startswith("Program is identical")
+            else (
+                "The patch validator rejected the response. Correct the exact mechanical error "
+                "below."
+            )
+        )
+        suffix = "\n".join(
+            [
+                "",
+                f"# Proposal repair {attempt}",
+                OPERATOR_INSTRUCTIONS[operator],
+                reason,
+                f"Validator feedback: {error}",
+                "Previous rejected response:",
+                "```text",
+                response[-self.config.artifact_chars :],
+                "```",
+                "Return a corrected proposal in the required SEARCH/REPLACE format.",
+            ]
+        )
+        available = max(0, self.config.max_prompt_chars - len(suffix) - 1)
+        user = original_user[:available] + "\n" + suffix
+        return SYSTEM_MESSAGE, user

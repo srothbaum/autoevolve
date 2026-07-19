@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import random
 import time
@@ -20,16 +21,32 @@ class _ResolvedModel:
     spec: ModelSpec
 
 
+@dataclass
+class _ModelStats:
+    outcomes: int = 0
+    reward: float = 0.0
+    cost_usd: float = 0.0
+
+
+class BudgetExceeded(RuntimeError):
+    pass
+
+
 SUPPORTED_PROVIDERS = {"openai_compatible", "codex_cli", "claude_code"}
 
 
 class ModelEnsemble:
-    """Weighted ensemble spanning HTTP models, Codex CLI, and Claude Code."""
+    """Budgeted adaptive ensemble spanning HTTP models, Codex CLI, and Claude Code."""
 
     def __init__(self, config: LLMConfig, seed: int = 42, cwd: Path | None = None):
         self.config = config
         self.random = random.Random(seed)
         self.cwd = None if cwd is None else cwd.resolve()
+        self._stats: dict[str, _ModelStats] = {}
+        self._calls = 0
+        self._input_tokens = 0
+        self._output_tokens = 0
+        self._cost_usd = 0.0
 
     def _resolve_model(self, spec: ModelSpec) -> _ResolvedModel:
         provider = spec.resolved_provider()
@@ -45,14 +62,94 @@ class ModelEnsemble:
             raise RuntimeError(f"No LLM model configured; set {env_hint}")
         return _ResolvedModel(name=name or f"{provider}-default", spec=spec)
 
-    def _choose_model(self) -> _ResolvedModel:
+    def _available_models(self) -> list[_ResolvedModel]:
         if not self.config.models:
             raise RuntimeError("No models configured")
+        enabled = [model for model in self.config.models if model.weight > 0]
         weights = [max(0.0, model.weight) for model in self.config.models]
         if not any(weights):
             raise RuntimeError("At least one model weight must be positive")
-        spec = self.random.choices(self.config.models, weights=weights, k=1)[0]
-        return self._resolve_model(spec)
+        return [self._resolve_model(model) for model in enabled]
+
+    def _choose_model(self) -> _ResolvedModel:
+        models = self._available_models()
+        if self.config.selection_strategy == "weighted" or len(models) == 1:
+            return self.random.choices(
+                models, weights=[item.spec.weight for item in models], k=1
+            )[0]
+
+        untried = [
+            item
+            for item in models
+            if self._stats.get(item.name, _ModelStats()).outcomes == 0
+        ]
+        if untried:
+            return self.random.choices(
+                untried, weights=[item.spec.weight for item in untried], k=1
+            )[0]
+
+        total = sum(self._stats[item.name].outcomes for item in models)
+
+        def score(item: _ResolvedModel) -> float:
+            stats = self._stats[item.name]
+            mean_reward = stats.reward / stats.outcomes
+            mean_cost = stats.cost_usd / stats.outcomes
+            exploration = self.config.ucb_exploration * math.sqrt(
+                math.log(total + 1) / stats.outcomes
+            )
+            return mean_reward + exploration - self.config.cost_penalty * mean_cost
+
+        scored = [(score(item), self.random.random(), item) for item in models]
+        return max(scored, key=lambda entry: (entry[0], entry[1]))[2]
+
+    def _model_by_name(self, name: str) -> _ResolvedModel:
+        for model in self._available_models():
+            if model.name == name:
+                return model
+        return self._choose_model()
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        return max(1, (len(text) + 3) // 4)
+
+    def seed_usage(
+        self, calls: int, input_tokens: int, output_tokens: int, cost_usd: float
+    ) -> None:
+        self._calls = max(0, int(calls))
+        self._input_tokens = max(0, int(input_tokens))
+        self._output_tokens = max(0, int(output_tokens))
+        self._cost_usd = max(0.0, float(cost_usd))
+
+    def seed_outcomes(self, outcomes: list[tuple[str, float, float]]) -> None:
+        for model, reward, cost_usd in outcomes:
+            self.record_outcome(model, reward, cost_usd)
+
+    def record_outcome(self, model: str, reward: float, cost_usd: float = 0.0) -> None:
+        stats = self._stats.setdefault(model, _ModelStats())
+        stats.outcomes += 1
+        stats.reward += float(reward)
+        stats.cost_usd += max(0.0, float(cost_usd))
+
+    def usage(self) -> dict[str, float | int]:
+        return {
+            "calls": self._calls,
+            "input_tokens": self._input_tokens,
+            "output_tokens": self._output_tokens,
+            "cost_usd": self._cost_usd,
+        }
+
+    def _reserve_call(self) -> None:
+        total_tokens = self._input_tokens + self._output_tokens
+        if self.config.max_calls is not None and self._calls >= self.config.max_calls:
+            raise BudgetExceeded(f"LLM call budget exhausted ({self.config.max_calls})")
+        if (
+            self.config.max_total_tokens is not None
+            and total_tokens >= self.config.max_total_tokens
+        ):
+            raise BudgetExceeded(f"LLM token budget exhausted ({self.config.max_total_tokens})")
+        if self.config.max_cost_usd is not None and self._cost_usd >= self.config.max_cost_usd:
+            raise BudgetExceeded(f"LLM cost budget exhausted (${self.config.max_cost_usd:.4f})")
+        self._calls += 1
 
     def _api_base(self) -> str:
         if self.config.api_base_env:
@@ -61,7 +158,7 @@ class ModelEnsemble:
                 return override.rstrip("/")
         return self.config.api_base.rstrip("/")
 
-    def _http_request(self, model: _ResolvedModel, system: str, user: str) -> str:
+    def _http_request(self, model: _ResolvedModel, system: str, user: str) -> tuple[str, int, int]:
         base = self._api_base()
         url = base if base.endswith("/chat/completions") else f"{base}/chat/completions"
         headers = {"Content-Type": "application/json"}
@@ -101,7 +198,14 @@ class ModelEnsemble:
                     )
                 if not isinstance(content, str) or not content.strip():
                     raise RuntimeError("LLM returned an empty response")
-                return content
+                usage = data.get("usage", {})
+                input_tokens = int(
+                    usage.get("prompt_tokens", self._estimate_tokens(system + "\n" + user))
+                )
+                output_tokens = int(
+                    usage.get("completion_tokens", self._estimate_tokens(content))
+                )
+                return content, input_tokens, output_tokens
             except (error.URLError, KeyError, IndexError, TypeError, ValueError, RuntimeError) as exc:
                 last_error = exc
                 if attempt < self.config.retries:
@@ -174,14 +278,39 @@ class ModelEnsemble:
             raise RuntimeError(f"{provider} returned an empty response")
         return output
 
-    async def generate(self, system: str, user: str) -> Generation:
-        model = self._choose_model()
+    async def _generate(
+        self, model: _ResolvedModel, system: str, user: str
+    ) -> Generation:
+        self._reserve_call()
         provider = model.spec.resolved_provider()
         if provider == "openai_compatible":
-            text = await asyncio.to_thread(self._http_request, model, system, user)
+            text, input_tokens, output_tokens = await asyncio.to_thread(
+                self._http_request, model, system, user
+            )
         else:
             text = await self._cli_request(model, system, user)
-        return Generation(text=text, model=model.name)
+            input_tokens = self._estimate_tokens(system + "\n" + user)
+            output_tokens = self._estimate_tokens(text)
+        cost_usd = (
+            input_tokens * model.spec.input_cost_per_million
+            + output_tokens * model.spec.output_cost_per_million
+        ) / 1_000_000
+        self._input_tokens += input_tokens
+        self._output_tokens += output_tokens
+        self._cost_usd += cost_usd
+        return Generation(
+            text=text,
+            model=model.name,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+        )
+
+    async def generate(self, system: str, user: str) -> Generation:
+        return await self._generate(self._choose_model(), system, user)
+
+    async def generate_with_model(self, system: str, user: str, model: str) -> Generation:
+        return await self._generate(self._model_by_name(model), system, user)
 
 
 OpenAICompatibleEnsemble = ModelEnsemble

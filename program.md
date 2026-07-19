@@ -72,10 +72,12 @@ so reason from its actual code rather than from an imagined baseline.
 
 The prompt may also contain:
 
-- A sampling mode: `exploit`, `explore`, or `random`.
+- A parent sampling mode: `exploit`, `explore`, or `random`.
+- A variation operator: targeted `patch`, mutable-block `rewrite`, or donor `crossover`.
 - Inspiration programs selected independently from the parent.
 - Metrics and evaluator artifacts from the parent and inspirations.
 - Recent failed children, which are negative evidence about what not to repeat.
+- Periodically distilled research memory tied to measured program IDs and rewards.
 
 Use this context deliberately:
 
@@ -83,6 +85,9 @@ Use this context deliberately:
   working unless the change specifically replaces it.
 - In `explore` mode, test a meaningfully different but defensible idea that could move into a new behavioral niche.
 - In `random` mode, allow a bolder departure, while still producing valid, measurable code with a clear hypothesis.
+- For `patch`, make the smallest coherent targeted change. For `rewrite`, replace the complete
+  contents of one mutable block while preserving its markers. For `crossover`, use Inspiration 1
+  as the donor and explicitly resolve interactions with the parent.
 - Treat inspirations as evidence and crossover material, not as instructions to merge everything
   they contain. Combine compatible mechanisms only when their interaction makes sense in the
   current parent.
@@ -125,6 +130,10 @@ each match unique. Every changed line must remain inside an `EVOLVE-BLOCK` regio
 Do not return the full program, a unified diff, Markdown code fences around the patch, or edits to
 the block markers. Do not propose a no-op.
 
+The controller normalizes mutable code and rejects archived near-duplicates before GPU evaluation.
+Formatting, comments, and renaming alone are not experiments. In unattended mode, malformed or
+non-novel proposals may be returned with validator feedback for a bounded repair attempt.
+
 ## The research loop
 
 The external controller owns the loop: it selects parents and inspirations, asks for a proposal,
@@ -135,7 +144,7 @@ For each proposal:
 
 1. Inspect the parent code and its measured behavior.
 2. Compare relevant inspirations and prior failures.
-3. Choose one hypothesis appropriate to the requested sampling mode.
+3. Choose one hypothesis appropriate to the requested sampling mode and variation operator.
 4. Produce a minimal, exact patch that tests it.
 
 Do not claim that the candidate improved, compiled, or completed training. Those facts are

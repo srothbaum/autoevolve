@@ -14,6 +14,7 @@ class RunConfig:
     workers: int = 2
     seed: int = 42
     run_dir: Path = Path(".autoevolve")
+    max_wall_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,8 @@ class ModelSpec:
     weight: float = 1.0
     temperature: float | None = 0.8
     max_tokens: int = 12000
+    input_cost_per_million: float = 0.0
+    output_cost_per_million: float = 0.0
     executable: str | None = None
     extra_args: list[str] = field(default_factory=list)
 
@@ -45,6 +48,12 @@ class LLMConfig:
     api_key_env: str | None = "OPENAI_API_KEY"
     timeout_seconds: float = 180.0
     retries: int = 2
+    selection_strategy: str = "ucb"
+    ucb_exploration: float = 0.7
+    cost_penalty: float = 0.0
+    max_calls: int | None = None
+    max_total_tokens: int | None = None
+    max_cost_usd: float | None = None
     models: list[ModelSpec] = field(default_factory=lambda: [ModelSpec()])
 
 
@@ -55,6 +64,14 @@ class PromptConfig:
     max_prompt_chars: int = 140000
     artifact_chars: int = 6000
     failed_attempts: int = 2
+    proposal_retries: int = 2
+    novelty_threshold: float = 0.999
+    novelty_shingle_size: int = 5
+    memory_interval: int = 10
+    memory_items: int = 5
+    operator_weights: dict[str, float] = field(
+        default_factory=lambda: {"patch": 0.6, "rewrite": 0.25, "crossover": 0.15}
+    )
 
 
 @dataclass(frozen=True)
@@ -125,6 +142,8 @@ def _model_from_dict(data: dict[str, Any]) -> ModelSpec:
             None if data.get("temperature") is None else float(data["temperature"])
         ),
         max_tokens=int(data.get("max_tokens", 12000)),
+        input_cost_per_million=max(0.0, float(data.get("input_cost_per_million", 0.0))),
+        output_cost_per_million=max(0.0, float(data.get("output_cost_per_million", 0.0))),
         executable=data.get("executable"),
         extra_args=[str(item) for item in data.get("extra_args", [])],
     )
@@ -141,6 +160,11 @@ def load_config(path: str | Path = "evolve.json") -> AppConfig:
         workers=max(1, int(run_data.get("workers", 2))),
         seed=int(run_data.get("seed", 42)),
         run_dir=_resolve_path(project_dir, run_data.get("run_dir", ".autoevolve")),
+        max_wall_seconds=(
+            None
+            if run_data.get("max_wall_seconds") is None
+            else max(0.0, float(run_data["max_wall_seconds"]))
+        ),
     )
 
     llm_data = data.get("llm", {})
@@ -151,17 +175,56 @@ def load_config(path: str | Path = "evolve.json") -> AppConfig:
         api_key_env=llm_data.get("api_key_env", "OPENAI_API_KEY"),
         timeout_seconds=float(llm_data.get("timeout_seconds", 180)),
         retries=max(0, int(llm_data.get("retries", 2))),
+        selection_strategy=str(llm_data.get("selection_strategy", "ucb")),
+        ucb_exploration=max(0.0, float(llm_data.get("ucb_exploration", 0.7))),
+        cost_penalty=max(0.0, float(llm_data.get("cost_penalty", 0.0))),
+        max_calls=(
+            None if llm_data.get("max_calls") is None else max(0, int(llm_data["max_calls"]))
+        ),
+        max_total_tokens=(
+            None
+            if llm_data.get("max_total_tokens") is None
+            else max(0, int(llm_data["max_total_tokens"]))
+        ),
+        max_cost_usd=(
+            None
+            if llm_data.get("max_cost_usd") is None
+            else max(0.0, float(llm_data["max_cost_usd"]))
+        ),
         models=models,
     )
+    if llm.selection_strategy not in {"weighted", "ucb"}:
+        raise ValueError("llm.selection_strategy must be 'weighted' or 'ucb'")
 
     prompt_data = data.get("prompt", {})
+    operator_weights = {
+        str(name): float(weight)
+        for name, weight in prompt_data.get(
+            "operator_weights", {"patch": 0.6, "rewrite": 0.25, "crossover": 0.15}
+        ).items()
+    }
     prompt = PromptConfig(
         task_file=_resolve_path(project_dir, prompt_data.get("task_file", "program.md")),
         num_inspirations=max(0, int(prompt_data.get("num_inspirations", 2))),
         max_prompt_chars=int(prompt_data.get("max_prompt_chars", 140000)),
         artifact_chars=int(prompt_data.get("artifact_chars", 6000)),
         failed_attempts=max(0, int(prompt_data.get("failed_attempts", 2))),
+        proposal_retries=max(0, int(prompt_data.get("proposal_retries", 2))),
+        novelty_threshold=float(prompt_data.get("novelty_threshold", 0.999)),
+        novelty_shingle_size=max(1, int(prompt_data.get("novelty_shingle_size", 5))),
+        memory_interval=max(0, int(prompt_data.get("memory_interval", 10))),
+        memory_items=max(0, int(prompt_data.get("memory_items", 5))),
+        operator_weights=operator_weights,
     )
+    unknown_operators = set(prompt.operator_weights) - {"patch", "rewrite", "crossover"}
+    if unknown_operators:
+        raise ValueError(f"Unknown prompt operators: {sorted(unknown_operators)}")
+    if any(weight < 0 for weight in prompt.operator_weights.values()) or not any(
+        prompt.operator_weights.values()
+    ):
+        raise ValueError("prompt.operator_weights must contain at least one positive weight")
+    if not 0.0 <= prompt.novelty_threshold <= 1.0:
+        raise ValueError("prompt.novelty_threshold must be between 0 and 1")
 
     evaluator_data = data.get("evaluator", {})
     stages = [

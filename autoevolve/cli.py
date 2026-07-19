@@ -60,6 +60,8 @@ async def _run(config: AppConfig, iterations: int | None, target: float | None) 
             on_result=_progress(config),
         )
         best = await controller.run(iterations=iterations, target=target)
+        if controller.stop_reason:
+            print(f"Stopped: {controller.stop_reason}")
         print(
             f"Best program: {best.id} | {config.evaluator.objective}="
             f"{_metric_text(best, config)} | exported to "
@@ -259,6 +261,10 @@ def main(argv: list[str] | None = None) -> int:
                             "generation": best.generation,
                             "metrics": best.metrics,
                             "model": best.model,
+                            "operator": best.operator,
+                            "reward": best.reward,
+                            "novelty": best.novelty,
+                            "cost_usd": best.cost_usd,
                             "export": str(
                                 config.run.run_dir / "best" / config.evaluator.program_file.name
                             ),

@@ -78,7 +78,29 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(self.db.recent_failures("baseline", 2)[0].id, "failed")
         self.assertNotIn("failed", self.db.membership_ids(0))
 
+    def test_usage_and_research_memory_are_persisted(self):
+        baseline = self._program("baseline", 1.0, 10)
+        self.db.add_program(baseline, memberships=[0, 1])
+        child = self._program("winner", 2.0, 12, parent_id="baseline")
+        child.model = "model-a"
+        child.operator = "crossover"
+        child.attempts = 2
+        child.input_tokens = 100
+        child.output_tokens = 40
+        child.cost_usd = 0.25
+        child.reward = 1.0
+        child.response = "Combine the donor optimizer.\n<<<<<<< SEARCH\n"
+        self.db.add_program(child)
+        self.db.complete_iteration()
+
+        self.assertEqual(
+            self.db.usage_summary(),
+            {"calls": 2, "input_tokens": 100, "output_tokens": 40, "cost_usd": 0.25},
+        )
+        memory = self.db.research_memory(interval=1, items=2)
+        self.assertIn("winner from baseline", memory)
+        self.assertIn("Combine the donor optimizer", memory)
+
 
 if __name__ == "__main__":
     unittest.main()
-

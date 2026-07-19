@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from autoevolve.config import LLMConfig, ModelSpec
-from autoevolve.llm import ModelEnsemble
+from autoevolve.llm import BudgetExceeded, ModelEnsemble
 
 
 class FakeProcess:
@@ -74,7 +74,34 @@ class LLMProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(process.input, b"user")
         self.assertEqual(result.model, "sonnet")
 
+    async def test_call_budget_is_hard(self):
+        process = FakeProcess()
+        create = AsyncMock(return_value=process)
+        config = LLMConfig(
+            api_key_env=None,
+            max_calls=1,
+            models=[ModelSpec(provider="codex_cli", provider_env=None, name_env=None)],
+        )
+        ensemble = ModelEnsemble(config, cwd=Path.cwd())
+        with patch("autoevolve.llm.asyncio.create_subprocess_exec", create):
+            await ensemble.generate("system", "user")
+            with self.assertRaisesRegex(BudgetExceeded, "call budget"):
+                await ensemble.generate("system", "user")
+        self.assertEqual(create.await_count, 1)
+
+    def test_ucb_prefers_model_with_better_observed_reward(self):
+        config = LLMConfig(
+            selection_strategy="ucb",
+            ucb_exploration=0.0,
+            models=[
+                ModelSpec(provider="codex_cli", provider_env=None, name="strong", name_env=None),
+                ModelSpec(provider="codex_cli", provider_env=None, name="weak", name_env=None),
+            ],
+        )
+        ensemble = ModelEnsemble(config)
+        ensemble.seed_outcomes([("strong", 0.5, 0.0), ("weak", -0.5, 0.0)])
+        self.assertEqual(ensemble._choose_model().name, "strong")
+
 
 if __name__ == "__main__":
     unittest.main()
-

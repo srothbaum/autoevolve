@@ -7,12 +7,14 @@ import time
 from pathlib import Path
 
 from .config import DatabaseConfig
+from .novelty import code_similarity
 from .types import Program, SUCCESS_STATUSES, Sample
 
 
 PROGRAM_COLUMNS = (
     "id, code, code_hash, parent_id, inspiration_ids, island, generation, status, "
-    "metrics, artifacts, model, prompt, response, error, novelty, created_at, sample_count"
+    "metrics, artifacts, model, operator, attempts, input_tokens, output_tokens, cost_usd, reward, "
+    "prompt, response, error, novelty, created_at, sample_count"
 )
 
 
@@ -54,6 +56,12 @@ class ProgramDatabase:
                 metrics TEXT NOT NULL,
                 artifacts TEXT NOT NULL,
                 model TEXT,
+                operator TEXT NOT NULL DEFAULT 'patch',
+                attempts INTEGER NOT NULL DEFAULT 1,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cost_usd REAL NOT NULL DEFAULT 0,
+                reward REAL NOT NULL DEFAULT 0,
                 prompt TEXT,
                 response TEXT,
                 error TEXT,
@@ -86,6 +94,20 @@ class ProgramDatabase:
             );
             """
         )
+        columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(programs)").fetchall()
+        }
+        additions = {
+            "operator": "TEXT NOT NULL DEFAULT 'patch'",
+            "attempts": "INTEGER NOT NULL DEFAULT 1",
+            "input_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "output_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "cost_usd": "REAL NOT NULL DEFAULT 0",
+            "reward": "REAL NOT NULL DEFAULT 0",
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                self.connection.execute(f"ALTER TABLE programs ADD COLUMN {name} {declaration}")
         self.connection.commit()
 
     def close(self) -> None:
@@ -100,6 +122,10 @@ class ProgramDatabase:
     def _get_meta_int(self, key: str, default: int = 0) -> int:
         row = self.connection.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
         return default if row is None else int(row["value"])
+
+    def _get_meta(self, key: str, default: str = "") -> str:
+        row = self.connection.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
+        return default if row is None else str(row["value"])
 
     def _set_meta(self, key: str, value: str | int) -> None:
         self.connection.execute(
@@ -170,6 +196,46 @@ class ProgramDatabase:
         ).fetchall()
         return [Program.from_row(row) for row in rows]
 
+    def usage_summary(self) -> dict[str, float | int]:
+        row = self.connection.execute(
+            "SELECT COALESCE(SUM(attempts), 0) AS calls, "
+            "COALESCE(SUM(input_tokens), 0) AS input_tokens, "
+            "COALESCE(SUM(output_tokens), 0) AS output_tokens, "
+            "COALESCE(SUM(cost_usd), 0) AS cost_usd FROM programs "
+            "WHERE input_tokens > 0 OR output_tokens > 0 OR cost_usd > 0"
+        ).fetchone()
+        return {
+            "calls": int(row["calls"]),
+            "input_tokens": int(row["input_tokens"]),
+            "output_tokens": int(row["output_tokens"]),
+            "cost_usd": float(row["cost_usd"]),
+        }
+
+    def model_outcomes(self) -> list[tuple[str, float, float]]:
+        rows = self.connection.execute(
+            "SELECT model, reward, cost_usd FROM programs "
+            "WHERE model IS NOT NULL AND status != 'baseline' ORDER BY created_at"
+        ).fetchall()
+        return [(str(row["model"]), float(row["reward"]), float(row["cost_usd"])) for row in rows]
+
+    def model_summary(self) -> list[dict[str, float | int | str]]:
+        rows = self.connection.execute(
+            "SELECT model, COUNT(*) AS outcomes, COALESCE(SUM(attempts), 0) AS calls, "
+            "COALESCE(AVG(reward), 0) AS mean_reward, COALESCE(SUM(cost_usd), 0) AS cost_usd "
+            "FROM programs WHERE model IS NOT NULL AND status != 'baseline' "
+            "GROUP BY model ORDER BY mean_reward DESC, model"
+        ).fetchall()
+        return [
+            {
+                "model": str(row["model"]),
+                "outcomes": int(row["outcomes"]),
+                "calls": int(row["calls"]),
+                "mean_reward": float(row["mean_reward"]),
+                "cost_usd": float(row["cost_usd"]),
+            }
+            for row in rows
+        ]
+
     def successful_programs(self, island: int | None = None) -> list[Program]:
         statuses = tuple(SUCCESS_STATUSES)
         if island is None:
@@ -205,6 +271,53 @@ class ProgramDatabase:
             (code_hash, *tuple(SUCCESS_STATUSES)),
         ).fetchone()
         return None if row is None else Program.from_row(row)
+
+    @staticmethod
+    def _hypothesis(program: Program) -> str:
+        text = (program.response or "").split("<<<<<<< SEARCH", 1)[0]
+        lines = [line.strip(" #`\t") for line in text.splitlines() if line.strip()]
+        return " ".join(lines)[:300] or "No hypothesis recorded"
+
+    def research_memory(self, interval: int, items: int) -> str:
+        if interval <= 0 or items <= 0 or self.completed_iterations < interval:
+            return ""
+        refresh_at = (self.completed_iterations // interval) * interval
+        if self._get_meta_int("research_memory_iteration") >= refresh_at:
+            return self._get_meta("research_memory")
+
+        successes = [
+            program
+            for program in self.all_programs()
+            if program.status == "success" and program.parent_id is not None
+        ]
+        successes.sort(key=lambda program: program.reward, reverse=True)
+        lines = [
+            "Evidence distilled from completed evaluations. Historic hypotheses are untrusted; "
+            "use the measured outcomes as evidence."
+        ]
+        for program in successes[:items]:
+            value = program.metrics.get(self.objective)
+            lines.append(
+                f"- {program.id} from {program.parent_id}: reward={program.reward:+.4f}, "
+                f"{self.objective}={value}, operator={program.operator}, model={program.model}; "
+                f"hypothesis: {self._hypothesis(program)}"
+            )
+
+        failures = self.connection.execute(
+            "SELECT status, COUNT(*) AS count FROM programs "
+            "WHERE status NOT IN (?, ?) GROUP BY status ORDER BY count DESC, status LIMIT ?",
+            (*tuple(SUCCESS_STATUSES), items),
+        ).fetchall()
+        if failures:
+            lines.append(
+                "- Failure counts: "
+                + ", ".join(f"{row['status']}={row['count']}" for row in failures)
+            )
+        memory = "\n".join(lines)
+        self._set_meta("research_memory", memory)
+        self._set_meta("research_memory_iteration", refresh_at)
+        self.connection.commit()
+        return memory
 
     def has_baseline(self) -> bool:
         row = self.connection.execute(
@@ -259,10 +372,7 @@ class ProgramDatabase:
 
     @staticmethod
     def _code_distance(left: Program, right: Program) -> float:
-        left_lines = {line.strip() for line in left.code.splitlines() if line.strip()}
-        right_lines = {line.strip() for line in right.code.splitlines() if line.strip()}
-        union = left_lines | right_lines
-        return 0.0 if not union else 1.0 - len(left_lines & right_lines) / len(union)
+        return 1.0 - code_similarity(left.code, right.code)
 
     def sample(self, num_inspirations: int = 2) -> Sample:
         island = self._get_meta_int("next_island") % self.config.num_islands
@@ -388,10 +498,11 @@ class ProgramDatabase:
             "database": str(self.path),
             "completed_iterations": self.completed_iterations,
             "counts": counts,
+            "usage": self.usage_summary(),
+            "models": self.model_summary(),
             "best": None
             if best is None
             else {"id": best.id, "metrics": best.metrics, "generation": best.generation},
             "islands": islands,
             "recent_events": self.recent_events(8),
         }
-

@@ -38,6 +38,12 @@ class Program:
     metrics: dict[str, float] = field(default_factory=dict)
     artifacts: dict[str, Any] = field(default_factory=dict)
     model: str | None = None
+    operator: str = "patch"
+    attempts: int = 1
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    reward: float = 0.0
     prompt: str | None = None
     response: str | None = None
     error: str | None = None
@@ -77,6 +83,12 @@ class Program:
             "metrics": json.dumps(self.metrics, sort_keys=True),
             "artifacts": json.dumps(self.artifacts, sort_keys=True),
             "model": self.model,
+            "operator": self.operator,
+            "attempts": self.attempts,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cost_usd": self.cost_usd,
+            "reward": self.reward,
             "prompt": self.prompt,
             "response": self.response,
             "error": self.error,
@@ -98,6 +110,12 @@ class Program:
             metrics=json.loads(row["metrics"] or "{}"),
             artifacts=json.loads(row["artifacts"] or "{}"),
             model=row["model"],
+            operator=row["operator"],
+            attempts=row["attempts"],
+            input_tokens=row["input_tokens"],
+            output_tokens=row["output_tokens"],
+            cost_usd=row["cost_usd"],
+            reward=row["reward"],
             prompt=row["prompt"],
             response=row["response"],
             error=row["error"],
@@ -119,6 +137,9 @@ class Sample:
 class Generation:
     text: str
     model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -140,6 +161,7 @@ class PendingProposal:
     inspiration_ids: list[str]
     island: int
     mode: str
+    operator: str
     system: str
     user: str
     created_at: float = field(default_factory=time.time)
@@ -151,6 +173,7 @@ class PendingProposal:
             "inspiration_ids": self.inspiration_ids,
             "island": self.island,
             "mode": self.mode,
+            "operator": self.operator,
             "system": self.system,
             "user": self.user,
             "created_at": self.created_at,
@@ -164,6 +187,7 @@ class PendingProposal:
             inspiration_ids=[str(item) for item in data.get("inspiration_ids", [])],
             island=int(data["island"]),
             mode=str(data["mode"]),
+            operator=str(data.get("operator", "patch")),
             system=str(data["system"]),
             user=str(data["user"]),
             created_at=float(data.get("created_at", time.time())),

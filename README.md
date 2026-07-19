@@ -7,15 +7,15 @@ program while keeping `prepare.py`, the data, evaluation, and five-minute budget
 
 Each iteration:
 
-1. Samples a parent and independent inspirations from an island-based MAP-Elites archive.
-2. Gives their code, metrics, artifacts, and relevant failures to an LLM.
-3. Applies exact `SEARCH/REPLACE` edits inside marked `EVOLVE-BLOCK` regions.
-4. Validates and evaluates the child, then stores its lineage and artifacts in SQLite.
+1. Samples a parent, donor inspirations, and a patch, mutable-block rewrite, or crossover operator.
+2. Gives their code, metrics, failures, and periodically distilled research memory to an LLM.
+3. Repairs malformed unattended proposals and rejects token-level near-duplicates before GPU evaluation.
+4. Evaluates a novel child, assigns a parent-relative reward, and stores everything in SQLite.
 
-The controller supports weighted model ensembles, evaluation cascades, exploit/explore/random
-sampling, island migration, asynchronous proposal generation, automatic resume, and best-program
-export. Inspiration crossover follows [CodeEvolve](https://arxiv.org/abs/2510.14150). This mini
-version omits distributed scheduling, embeddings, LLM evaluators, and container isolation.
+The controller uses island-based MAP-Elites, migration, evaluation cascades, bounded proposal
+repair, and UCB model selection. It resumes automatically and exports the best program without
+overwriting tracked `train.py`. This mini version omits distributed scheduling, embedding or LLM
+novelty judges, dynamic islands, prompt evolution, and container isolation.
 
 ## Setup
 
@@ -78,7 +78,7 @@ unauthenticated endpoint, set `llm.api_key_env` to `null` in `evolve.json`.
 Compatibility means accepting `POST /chat/completions` under the configured base URL with OpenAI
 Chat Completions request and response fields. Native Gemini or Anthropic endpoints are not accepted.
 One run has one HTTP base URL and credential source; use a router to combine models hosted by
-different HTTP providers. Model entries behind that endpoint can still be sampled by weight.
+different HTTP providers.
 
 On PowerShell, replace `export NAME="value"` with `$env:NAME = "value"`.
 
@@ -99,9 +99,24 @@ Put `--config path/to/evolve.json` before the subcommand to use another configur
 from `.autoevolve/evolution.db`; the winner is exported to `.autoevolve/best/train.py`. The
 controller never overwrites the tracked `train.py`.
 
-`evolve.json` defines models, prompt limits, evaluator stages, objective direction, islands,
-migration, and MAP-Elites features. Evaluator stages can enforce metric thresholds before a child
-reaches an expensive stage. Feature dimensions may use numeric metrics, `code_length`, or `novelty`.
+`evolve.json` defines models, evaluator stages, islands, operators, novelty, memory, and budgets.
+Important controls:
+
+- `llm.selection_strategy`: `ucb` adapts to measured model rewards; `weighted` preserves static
+  weighted sampling. A model with weight `0` is disabled.
+- `prompt.operator_weights`: probabilities for targeted patches, complete mutable-block rewrites,
+  and donor crossover. Protected code and `EVOLVE-BLOCK` markers remain immutable.
+- `prompt.proposal_retries`: repair or novelty-resampling attempts before recording a rejection.
+- `prompt.novelty_threshold`: maximum archived token-shingle similarity; `0` disables the gate.
+- `llm.max_calls`, `max_total_tokens`, `max_cost_usd`, and `run.max_wall_seconds`: optional run
+  limits. Set per-model token prices to estimate cost; CLI token counts are estimated from text.
+
+Evaluator stages can enforce metric thresholds before an expensive stage. MAP-Elites feature
+dimensions may use numeric metrics, `code_length`, or `novelty`.
+
+`proposal_retries` applies to unattended providers. In coding-agent mode, `submit` records the
+rejection and the outer agent sees that feedback on the next `sample`, preserving the direct
+autoresearch handshake without a nested model call.
 
 ## Safety and tests
 
@@ -109,8 +124,8 @@ Candidates execute in temporary directories, and common LLM API-key variables ar
 their environment. This is process isolation, not a security boundary; generated Python still runs
 on the host. Use an isolated machine or account for untrusted models or tasks.
 
-Sampling is seeded, and prompts, responses, results, failures, and artifacts are retained. Remote
-models may remain nondeterministic.
+Sampling is seeded, and prompts, retries, model usage, rewards, results, failures, and artifacts are
+retained. Existing databases are migrated additively. Remote models may remain nondeterministic.
 
 Tests use fake models and tiny evaluators, requiring neither a GPU nor an API key:
 

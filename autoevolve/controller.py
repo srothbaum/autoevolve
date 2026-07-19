@@ -9,6 +9,8 @@ from pathlib import Path
 from .config import AppConfig
 from .database import ProgramDatabase
 from .evaluator import Evaluator
+from .llm import BudgetExceeded
+from .novelty import code_similarity
 from .patching import PatchError, apply_patch
 from .prompt import PromptBuilder
 from .types import EvaluationResult, Generation, Generator, PendingProposal, Program, Sample
@@ -37,17 +39,22 @@ class EvolutionController:
         self.on_result = on_result
         self._database_lock = asyncio.Lock()
         self._stop = asyncio.Event()
+        self._budget_reason: str | None = None
+        if self.generator is not None:
+            seed_usage = getattr(self.generator, "seed_usage", None)
+            if callable(seed_usage):
+                seed_usage(**self.database.usage_summary())
+            seed_outcomes = getattr(self.generator, "seed_outcomes", None)
+            if callable(seed_outcomes):
+                seed_outcomes(self.database.model_outcomes())
 
     @staticmethod
     def _new_id() -> str:
         return uuid.uuid4().hex[:10]
 
-    @staticmethod
-    def _novelty(parent: Program, child_code: str) -> float:
-        parent_lines = {line.strip() for line in parent.code.splitlines() if line.strip()}
-        child_lines = {line.strip() for line in child_code.splitlines() if line.strip()}
-        union = parent_lines | child_lines
-        return 0.0 if not union else 1.0 - len(parent_lines & child_lines) / len(union)
+    @property
+    def stop_reason(self) -> str | None:
+        return self._budget_reason
 
     async def ensure_baseline(self) -> Program:
         async with self._database_lock:
@@ -80,6 +87,12 @@ class EvolutionController:
         return baseline
 
     async def run(self, iterations: int | None = None, target: float | None = None) -> Program:
+        loop = asyncio.get_running_loop()
+        deadline = (
+            None
+            if self.config.run.max_wall_seconds is None
+            else loop.time() + self.config.run.max_wall_seconds
+        )
         await self.ensure_baseline()
         total = self.config.run.iterations if iterations is None else max(0, iterations)
         if total == 0:
@@ -95,6 +108,10 @@ class EvolutionController:
         async def reserve_job() -> int | None:
             nonlocal next_job
             async with job_lock:
+                if deadline is not None and loop.time() >= deadline:
+                    await self._stop_for_budget(
+                        f"Wall-clock budget exhausted ({self.config.run.max_wall_seconds}s)"
+                    )
                 if self._stop.is_set() or next_job >= total:
                     return None
                 next_job += 1
@@ -115,13 +132,16 @@ class EvolutionController:
         self._export_best(best)
         return best
 
-    async def _evolve_once(self, iteration: int, target: float | None) -> Program:
+    async def _evolve_once(self, iteration: int, target: float | None) -> Program | None:
         pending, sample = await self._prepare_proposal(iteration)
         if self.generator is None:
             raise RuntimeError("No automatic model generator is configured")
         program_id = self._new_id()
         try:
             generation = await self.generator.generate(pending.system, pending.user)
+        except BudgetExceeded as exc:
+            await self._stop_for_budget(str(exc))
+            return None
         except Exception as exc:
             program = Program(
                 id=program_id,
@@ -131,8 +151,10 @@ class EvolutionController:
                 island=sample.island,
                 generation=sample.parent.generation + 1,
                 status="generation_error",
+                operator=pending.operator,
                 prompt=pending.user,
                 error=str(exc),
+                reward=-0.25,
             )
             return await self._record(program, iteration, target)
         return await self._evaluate_generation(pending, sample, generation, target, program_id)
@@ -172,12 +194,18 @@ class EvolutionController:
             failures = self.database.recent_failures(
                 sample.parent.id, self.config.prompt.failed_attempts
             )
+            memory = self.database.research_memory(
+                self.config.prompt.memory_interval, self.config.prompt.memory_items
+            )
+        operator = self.prompt_builder.choose_operator(bool(sample.inspirations))
         system, user = self.prompt_builder.build(
             sample.parent,
             sample.inspirations,
             failures,
             iteration,
             sample.mode,
+            operator,
+            memory,
         )
         pending = PendingProposal(
             iteration=iteration,
@@ -185,6 +213,7 @@ class EvolutionController:
             inspiration_ids=[item.id for item in sample.inspirations],
             island=sample.island,
             mode=sample.mode,
+            operator=operator,
             system=system,
             user=user,
         )
@@ -198,51 +227,168 @@ class EvolutionController:
         target: float | None,
         program_id: str,
     ) -> Program:
+        generations = [generation]
+        while True:
+            candidate = await self._build_candidate(
+                pending, sample, generations[-1], generations, program_id
+            )
+            if candidate.status == "pending":
+                result: EvaluationResult = await self.evaluator.evaluate(candidate)
+                candidate.status = result.status
+                candidate.metrics = result.metrics
+                candidate.artifacts = result.artifacts
+                candidate.error = result.error
+                candidate.reward = self._reward(candidate, sample.parent)
+                return await self._record(candidate, pending.iteration, target)
+
+            repairable = candidate.status in {"patch_error", "duplicate", "not_novel"}
+            retries_used = len(generations) - 1
+            if (
+                not repairable
+                or self.generator is None
+                or retries_used >= self.config.prompt.proposal_retries
+            ):
+                candidate.reward = self._reward(candidate, sample.parent)
+                return await self._record(candidate, pending.iteration, target)
+
+            async with self._database_lock:
+                self.database.log_event(
+                    "proposal_retry",
+                    {
+                        "iteration": pending.iteration,
+                        "attempt": len(generations),
+                        "status": candidate.status,
+                        "error": candidate.error,
+                        "model": generation.model,
+                        "operator": pending.operator,
+                    },
+                )
+            system, user = self.prompt_builder.repair(
+                pending.user,
+                generations[-1].text,
+                candidate.error or candidate.status,
+                pending.operator,
+                len(generations) + 1,
+            )
+            try:
+                generations.append(await self._generate_repair(system, user, generation.model))
+            except BudgetExceeded as exc:
+                await self._stop_for_budget(str(exc))
+                candidate.reward = self._reward(candidate, sample.parent)
+                return await self._record(candidate, pending.iteration, target)
+            except Exception as exc:
+                candidate.status = "generation_error"
+                candidate.error = f"Proposal repair failed: {exc}"
+                candidate.reward = self._reward(candidate, sample.parent)
+                return await self._record(candidate, pending.iteration, target)
+
+    async def _generate_repair(self, system: str, user: str, model: str) -> Generation:
+        if self.generator is None:
+            raise RuntimeError("No automatic model generator is configured")
+        generate_with_model = getattr(self.generator, "generate_with_model", None)
+        if callable(generate_with_model):
+            return await generate_with_model(system, user, model)
+        return await self.generator.generate(system, user)
+
+    @staticmethod
+    def _combined_response(generations: list[Generation]) -> str:
+        if len(generations) == 1:
+            return generations[0].text
+        return "\n\n".join(
+            f"## Proposal attempt {index}\n{item.text}"
+            for index, item in enumerate(generations, 1)
+        )
+
+    async def _build_candidate(
+        self,
+        pending: PendingProposal,
+        sample: Sample,
+        generation: Generation,
+        generations: list[Generation],
+        program_id: str,
+    ) -> Program:
+        common = {
+            "id": program_id,
+            "parent_id": sample.parent.id,
+            "inspiration_ids": [item.id for item in sample.inspirations],
+            "island": sample.island,
+            "generation": sample.parent.generation + 1,
+            "model": generation.model,
+            "operator": pending.operator,
+            "attempts": len(generations),
+            "input_tokens": sum(item.input_tokens for item in generations),
+            "output_tokens": sum(item.output_tokens for item in generations),
+            "cost_usd": sum(item.cost_usd for item in generations),
+            "prompt": pending.user,
+            "response": self._combined_response(generations),
+        }
         try:
             child_code = apply_patch(sample.parent.code, generation.text)
         except PatchError as exc:
-            program = Program(
-                id=program_id,
+            return Program(
                 code=sample.parent.code,
-                parent_id=sample.parent.id,
-                inspiration_ids=[item.id for item in sample.inspirations],
-                island=sample.island,
-                generation=sample.parent.generation + 1,
                 status="patch_error",
-                model=generation.model,
-                prompt=pending.user,
-                response=generation.text,
                 error=str(exc),
+                **common,
             )
-            return await self._record(program, pending.iteration, target)
 
         candidate = Program(
-            id=program_id,
             code=child_code,
-            parent_id=sample.parent.id,
-            inspiration_ids=[item.id for item in sample.inspirations],
-            island=sample.island,
-            generation=sample.parent.generation + 1,
             status="pending",
-            model=generation.model,
-            prompt=pending.user,
-            response=generation.text,
-            novelty=self._novelty(sample.parent, child_code),
+            **common,
         )
 
         async with self._database_lock:
             duplicate = self.database.find_success_by_hash(candidate.code_hash)
+            archive = self.database.successful_programs()
         if duplicate is not None:
             candidate.status = "duplicate"
             candidate.error = f"Program is identical to successful candidate {duplicate.id}"
-            return await self._record(candidate, pending.iteration, target)
+            return candidate
 
-        result: EvaluationResult = await self.evaluator.evaluate(candidate)
-        candidate.status = result.status
-        candidate.metrics = result.metrics
-        candidate.artifacts = result.artifacts
-        candidate.error = result.error
-        return await self._record(candidate, pending.iteration, target)
+        if archive:
+            similarities = [
+                (
+                    code_similarity(
+                        candidate.code, program.code, self.config.prompt.novelty_shingle_size
+                    ),
+                    program,
+                )
+                for program in archive
+            ]
+            similarity, nearest = max(similarities, key=lambda item: item[0])
+            candidate.novelty = 1.0 - similarity
+            threshold = self.config.prompt.novelty_threshold
+            if threshold > 0 and similarity >= threshold:
+                candidate.status = "not_novel"
+                candidate.error = (
+                    f"Novelty gate: similarity {similarity:.6f} to archived program {nearest.id} "
+                    f"meets threshold {threshold:.6f}"
+                )
+        else:
+            candidate.novelty = 1.0
+        return candidate
+
+    def _reward(self, program: Program, parent: Program) -> float:
+        if program.status != "success":
+            return -0.10 if program.status in {"patch_error", "duplicate", "not_novel"} else -0.25
+        parent_value = parent.metrics.get(self.config.evaluator.objective)
+        child_value = program.metrics.get(self.config.evaluator.objective)
+        if parent_value is None or child_value is None:
+            return 0.0
+        improvement = (
+            parent_value - child_value
+            if self.config.evaluator.direction == "minimize"
+            else child_value - parent_value
+        )
+        return max(-1.0, min(1.0, improvement / max(abs(parent_value), 1e-12)))
+
+    async def _stop_for_budget(self, reason: str) -> None:
+        async with self._database_lock:
+            if self._budget_reason is None:
+                self._budget_reason = reason
+                self.database.log_event("budget_stop", {"reason": reason})
+        self._stop.set()
 
     async def _record(self, program: Program, iteration: int, target: float | None) -> Program:
         async with self._database_lock:
@@ -261,6 +407,10 @@ class EvolutionController:
                     "status": program.status,
                     "metrics": program.metrics,
                     "model": program.model,
+                    "operator": program.operator,
+                    "attempts": program.attempts,
+                    "reward": program.reward,
+                    "cost_usd": program.cost_usd,
                 },
             )
             if best is not None:
@@ -270,6 +420,11 @@ class EvolutionController:
 
         if self.on_result is not None:
             self.on_result(program, best, completed)
+        record_outcome = None if self.generator is None else getattr(
+            self.generator, "record_outcome", None
+        )
+        if callable(record_outcome) and program.model is not None:
+            record_outcome(program.model, program.reward, program.cost_usd)
         return program
 
     def _target_reached(self, best: Program, target: float) -> bool:
@@ -293,6 +448,13 @@ class EvolutionController:
                     "generation": best.generation,
                     "metrics": best.metrics,
                     "model": best.model,
+                    "operator": best.operator,
+                    "reward": best.reward,
+                    "novelty": best.novelty,
+                    "attempts": best.attempts,
+                    "input_tokens": best.input_tokens,
+                    "output_tokens": best.output_tokens,
+                    "cost_usd": best.cost_usd,
                 },
                 indent=2,
                 sort_keys=True,

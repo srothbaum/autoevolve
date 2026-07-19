@@ -78,6 +78,15 @@ def _inside_region(start: int, end: int, regions: list[tuple[int, int]]) -> bool
     return any(start >= region_start and end <= region_end for region_start, region_end in regions)
 
 
+def evolve_content(code: str) -> str:
+    """Return only mutable regions, or the whole file when no regions are declared."""
+    normalized = code.replace("\r\n", "\n").replace("\r", "\n")
+    regions = _evolve_regions(normalized)
+    if not regions:
+        return normalized
+    return "\n\n".join(normalized[start:end] for start, end in regions)
+
+
 def apply_patch(code: str, response: str, *, validate_python: bool = True) -> str:
     current = code.replace("\r\n", "\n").replace("\r", "\n")
     blocks = parse_patch(response)
