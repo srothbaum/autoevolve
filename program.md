@@ -1,113 +1,147 @@
-# autoresearch
+# autoevolve
 
-This is an experiment to have the LLM do its own research.
+This is an experiment to have an LLM do its own research.
 
-## Setup
-
-To set up a new experiment, work with the user to:
-
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar5`). The branch `autoresearch/<tag>` must not already exist — this is a fresh run.
-2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
-3. **Read the in-scope files**: The repo is small. Read these files for full context:
-   - `README.md` — repository context.
-   - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
-   - `train.py` — the file you modify. Model architecture, optimizer, training loop.
-   - `evo_db.py` — evolutionary database. Do not modify. Used via CLI to record and sample experiments.
-4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
-5. **Confirm and go**: Confirm setup looks good.
-
-Once you get confirmation, kick off the experimentation.
+You are the proposal-generating component of a small AlphaEvolve-style system. Your task is to
+improve a training program by proposing one concrete code change at a time. An external controller
+applies your patch, runs the experiment, measures it, and stores the result in an evolutionary
+program database.
 
 ## Experimentation
 
-Each experiment runs on a single GPU. The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
+Each experiment runs on a single GPU for a fixed five-minute training budget. The controller may
+use cheaper evaluation stages before the full run, but the final objective is always measured under
+the same budget and hardware constraints.
 
 **What you CAN do:**
-- Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc.
+
+- Modify code inside the marked `EVOLVE-BLOCK` regions of the parent program.
+- Change the model architecture, optimizer, schedule, regularization, initialization, numerical
+  implementation, and other training logic inside those regions.
+- Make coordinated edits when they test one coherent hypothesis.
+- Reuse, combine, or adapt useful ideas from the supplied inspiration programs.
 
 **What you CANNOT do:**
-- Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants (time budget, sequence length, etc).
-- Modify `evo_db.py`. It is read-only. It contains the database logic for recording and sampling experiments.
-- Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
-- Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
 
-**The goal is simple: get the lowest val_bpb.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
+- Modify code outside an `EVOLVE-BLOCK` region.
+- Change the evaluator, dataset, metric parser, time budget, GPU assignment, or experiment harness.
+- Add dependencies that are not already available to the evaluator.
 
-**VRAM** is a soft constraint. Some increase is acceptable for meaningful val_bpb gains, but it should not blow up dramatically.
+**The goal is simple: achieve the lowest validation bits per byte (`val_bpb`).**
 
-**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_bpb improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_bpb improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
+Throughput matters only because the time budget is fixed. A faster program can train for more
+steps, but speed is not useful if validation quality gets worse.
 
-**The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
+GPU memory is a practical constraint. Avoid changes that are likely to exceed the available memory.
+Using more memory is acceptable when it produces a meaningful improvement and remains within the
+evaluator's limit.
+
+**Simplicity criterion:** when two programs perform similarly, prefer the simpler and more
+understandable one. Do not add complexity without a plausible reason it should improve the
+objective.
+
+The baseline and all candidate results are measured by the external controller. Do not invent
+measurements or assume that an untested idea worked.
 
 ## Output format
 
-Once the script finishes it prints a summary like this:
+Successful training runs end with a machine-readable summary like this:
 
-```
+```text
 ---
-val_bpb:          0.997900
-training_seconds: 300.1
-total_seconds:    325.9
-peak_vram_mb:     45060.2
+val_bpb:          1.234567
+training_seconds: 300.0
+total_seconds:    305.0
+peak_vram_mb:     12345.0
 mfu_percent:      39.80
 total_tokens_M:   499.6
-num_steps:        953
-num_params_M:     50.3
+num_steps:        1234
+num_params_M:     12.34
 depth:            8
 ```
 
-Note that the script is configured to always stop after 5 minutes, so depending on the computing platform of this computer the numbers might look different.
+The evolutionary controller records these metrics, evaluator artifacts, lineage, and failures.
+`val_bpb` is the primary objective; the other values provide evidence about efficiency,
+feasibility, and behavioral tradeoffs.
 
-## Logging results
+## Evolutionary context
 
-When an experiment is done, log it to the evolutionary database (`evo_db.py`). The database maintains a diverse population of experiments across a 2D feature grid (model size vs VRAM usage), with val_bpb as the fitness metric.
+Every proposal prompt contains a current parent program. Your patch is applied to that exact parent,
+so reason from its actual code rather than from an imagined baseline.
 
-**Recording a successful experiment:**
-```bash
-uv run evo_db add --commit <hash, short, 7 chars> --parent <id> --description "..." --log run.log
+The prompt may also contain:
+
+- A sampling mode: `exploit`, `explore`, or `random`.
+- Inspiration programs selected independently from the parent.
+- Metrics and evaluator artifacts from the parent and inspirations.
+- Recent failed children, which are negative evidence about what not to repeat.
+
+Use this context deliberately:
+
+- In `exploit` mode, make a focused refinement to a strong program. Preserve what appears to be
+  working unless the change specifically replaces it.
+- In `explore` mode, test a meaningfully different but defensible idea that could move into a new behavioral niche.
+- In `random` mode, allow a bolder departure, while still producing valid, measurable code with a clear hypothesis.
+- Treat inspirations as evidence and crossover material, not as instructions to merge everything
+  they contain. Combine compatible mechanisms only when their interaction makes sense in the
+  current parent.
+- Learn from failures. Avoid repeating changes that already crashed, timed out, exceeded memory,
+  failed validation, or clearly degraded the objective unless your proposal addresses the cause.
+
+## Designing the next experiment
+
+Propose one coherent experiment. State the hypothesis briefly, then make only the edits needed to test it.
+
+Architecture search and hyperparameter search are both in scope. Useful proposals may change layer
+structure, attention or mixing mechanisms, normalization, activations, parameter sharing, optimizer
+behavior, learning-rate schedules, batch construction, or other editable training choices. Do not
+reduce the search to blind tuning, and do not bundle unrelated guesses into one candidate.
+
+Reason about interactions with the fixed budget. For example, a larger model may improve capacity
+but reduce the number of optimization steps; a faster operation may permit more steps but change
+optimization behavior; a schedule change must make sense over the observed run length.
+
+Prefer changes whose outcome will teach the search something even if they fail to beat the parent.
+A good experiment has a plausible causal story and a result that can guide later proposals.
+
+## Proposal format
+
+Return a brief hypothesis followed by one or more exact `SEARCH`/`REPLACE` blocks:
+
+```text
+Hypothesis: <one concise explanation of why this should improve the objective>
+
+ <<<<<<< SEARCH
+<exact text copied from the parent>
+ =======
+<replacement text>
+ >>>>>>> REPLACE
 ```
 
-**Recording a crashed experiment:**
-```bash
-uv run evo_db add-crash --commit <hash, short, 7 chars> --parent <id> --description "..."
-```
+The `SEARCH` text must occur exactly once in the parent. Include enough unchanged context to make
+each match unique. Every changed line must remain inside an `EVOLVE-BLOCK` region.
 
-The `--log run.log` flag parses all metrics automatically from the train.py output. You only provide 3 things: commit hash, parent experiment id (from the sample step), and a description.
+Do not return the full program, a unified diff, Markdown code fences around the patch, or edits to
+the block markers. Do not propose a no-op.
 
-**Other useful commands:**
-```bash
-uv run evo_db sample    # Get next parent + inspirations (JSON)
-uv run evo_db status    # Population overview with MAP-Elites grids
-uv run evo_db best      # Show best experiment
-uv run evo_db history   # Recent experiments
-```
+## The research loop
 
-## The experiment loop
+The external controller owns the loop: it selects parents and inspirations, asks for a proposal,
+validates and applies the patch, evaluates the child, records all artifacts, and updates the
+population. You are responsible for exactly one proposal in the current prompt.
 
-The experiment runs on a dedicated branch (e.g. `autoresearch/mar5` or `autoresearch/mar5-gpu0`).
+For each proposal:
 
-LOOP FOREVER:
+1. Inspect the parent code and its measured behavior.
+2. Compare relevant inspirations and prior failures.
+3. Choose one hypothesis appropriate to the requested sampling mode.
+4. Produce a minimal, exact patch that tests it.
 
-1. **SAMPLE**: Run `uv run evo_db sample` to get a parent experiment, inspirations, and a strategy hint (exploit/explore/random). Read the JSON output carefully — it tells you what to build on and what to try.
-2. **RESTORE parent's code**: `git show <parent_commit>:train.py > train.py` — this restores the parent's version of train.py without switching branches.
-3. **DESIGN** your change based on the parent code, the inspirations, and the strategy hint. For "exploit", make incremental improvements. For "explore", try something structurally different. For "random", go bold.
-4. **EDIT** `train.py` with your experimental change.
-5. **GIT COMMIT** the change.
-6. **RUN**: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-7. **RECORD**:
-   - Check results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
-   - If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't fix it after a few attempts, record as crash.
-   - If success: `uv run evo_db add --commit <hash> --parent <parent_id> --description "..." --log run.log`
-   - If crash: `uv run evo_db add-crash --commit <hash> --parent <parent_id> --description "..."`
-8. Optionally: `uv run evo_db status` to review population state.
-9. **GOTO 1**
+Do not claim that the candidate improved, compiled, or completed training. Those facts are
+established only after evaluation.
 
-You always start each iteration by sampling a parent from the population, which may be any past successful experiment, not just the most recent one.
+Crashes and unsuccessful experiments are useful evidence, but malformed patches waste an evaluation
+opportunity. Make the proposal syntactically complete and internally consistent.
 
-**Timeout**: Each experiment should take ~5 minutes total (+ a few seconds for startup and eval overhead). If a run exceeds 10 minutes, kill it and treat it as a failure (record as crash).
-
-**Crashes**: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, record as crash, and move on.
-
-**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
-
-As an example use case, a user might leave you running while they sleep. If each experiment takes you ~5 minutes then you can run approx 12/hour, for a total of about 100 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
+Keep searching. Strong results should be refined, diverse ideas should remain possible, and failed
+branches should inform rather than end the research process.

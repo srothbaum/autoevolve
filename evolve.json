@@ -1,0 +1,90 @@
+{
+  "run": {
+    "iterations": 100,
+    "workers": 2,
+    "seed": 42,
+    "run_dir": ".autoevolve"
+  },
+  "llm": {
+    "api_base": "https://api.openai.com/v1",
+    "api_base_env": "OPENAI_BASE_URL",
+    "api_key_env": "OPENAI_API_KEY",
+    "timeout_seconds": 180,
+    "retries": 2,
+    "models": [
+      {
+        "provider": "openai_compatible",
+        "provider_env": "AUTOEVOLVE_PROVIDER",
+        "name": "",
+        "name_env": "AUTOEVOLVE_MODEL",
+        "weight": 1.0,
+        "temperature": 0.8,
+        "max_tokens": 12000
+      }
+    ]
+  },
+  "prompt": {
+    "task_file": "program.md",
+    "num_inspirations": 2,
+    "max_prompt_chars": 140000,
+    "artifact_chars": 6000,
+    "failed_attempts": 2
+  },
+  "evaluator": {
+    "program_file": "train.py",
+    "fixed_files": ["prepare.py"],
+    "objective": "val_bpb",
+    "direction": "minimize",
+    "concurrency": 1,
+    "cuda_visible_devices": "0",
+    "strip_env": [
+      "OPENAI_API_KEY",
+      "CODEX_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN"
+    ],
+    "stages": [
+      {
+        "name": "train",
+        "command": [
+          "uv",
+          "run",
+          "--project",
+          "{project_dir}",
+          "python",
+          "{program}"
+        ],
+        "timeout_seconds": 900,
+        "required_metrics": [
+          "val_bpb",
+          "peak_vram_mb",
+          "num_params_M",
+          "total_tokens_M"
+        ]
+      }
+    ]
+  },
+  "database": {
+    "path": ".autoevolve/evolution.db",
+    "population_size": 64,
+    "num_islands": 4,
+    "migration_interval": 20,
+    "migration_count": 1,
+    "exploitation_ratio": 0.7,
+    "exploration_ratio": 0.2,
+    "features": [
+      {
+        "name": "num_params_M",
+        "minimum": 10,
+        "maximum": 250,
+        "bins": 8
+      },
+      {
+        "name": "peak_vram_mb",
+        "minimum": 1000,
+        "maximum": 100000,
+        "bins": 8
+      }
+    ]
+  }
+}

@@ -4,6 +4,7 @@ Cherry-picked and simplified from nanochat.
 Usage: uv run train.py
 """
 
+# EVOLVE-BLOCK-START
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
@@ -628,3 +629,4 @@ print(f"total_tokens_M:   {total_tokens / 1e6:.1f}")
 print(f"num_steps:        {step}")
 print(f"num_params_M:     {num_params / 1e6:.1f}")
 print(f"depth:            {DEPTH}")
+# EVOLVE-BLOCK-END

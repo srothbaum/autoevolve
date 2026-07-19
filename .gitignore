@@ -12,10 +12,6 @@ worktrees/
 results/
 queue/
 
-# Agent prompt files (generated per-session by launchers)
-CLAUDE.md
-AGENTS.md
-
 # Experimental code/artifacts
 dev/
 
@@ -28,3 +24,5 @@ results.tsv
 # Evolutionary database
 evo_db.json
 evo_db_config.json
+evo_db.lock
+.autoevolve/
