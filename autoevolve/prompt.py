@@ -40,6 +40,7 @@ OPERATOR_INSTRUCTIONS = {
     "rewrite": (
         "Operator: mutable-block rewrite. Redesign one complete EVOLVE-BLOCK as a coherent unit, "
         "expressed as a SEARCH/REPLACE of that block's contents. Keep both boundary markers and all "
+        "protected code unchanged."
     ),
     "crossover": (
         "Operator: explicit crossover. Treat Inspiration 1 as the donor, combine a distinct useful "
